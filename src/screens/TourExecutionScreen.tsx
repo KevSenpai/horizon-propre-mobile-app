@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { View, StyleSheet, FlatList, Alert } from 'react-native';
-import { Appbar, Card, Text, Button, IconButton, ActivityIndicator, FAB } from 'react-native-paper';
+import { Appbar, Card, Text, Button, IconButton, ActivityIndicator } from 'react-native-paper';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { api } from '../config/api';
+// Imports WebSocket
+import { connectSocket, disconnectSocket, sendPosition, sendCollectionUpdate } from '../services/socket';
 
 export default function TourExecutionScreen({ tour, onBack }: any) {
   const [clients, setClients] = useState<any[]>([]);
@@ -11,15 +13,58 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
   const [currentLocation, setCurrentLocation] = useState<any>(null);
   const [isStarted, setIsStarted] = useState(tour.status === 'IN_PROGRESS');
 
-  // 1. Charger les clients et la position GPS
+  // 1. Initialisation (Chargement + WebSocket + GPS)
   useEffect(() => {
     loadClients();
-    getCurrentLocation();
-  }, []);
+    
+    // Connexion au canal radio (WebSocket)
+    connectSocket();
+
+    // Gestion du GPS en temps réel
+    let locationSubscription: Location.LocationSubscription | null = null;
+
+    const startTracking = async () => {
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert("Permission refusée", "La géolocalisation est nécessaire pour le suivi.");
+        return;
+      }
+
+      // On récupère la position initiale
+      let initialLocation = await Location.getCurrentPositionAsync({});
+      setCurrentLocation(initialLocation.coords);
+
+      // On s'abonne aux changements de position (Tracking)
+      locationSubscription = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.High,
+          timeInterval: 10000, // Envoi toutes les 10 secondes
+          distanceInterval: 50, // Ou tous les 50 mètres
+        },
+        (location) => {
+          const { latitude, longitude } = location.coords;
+          setCurrentLocation(location.coords); // Mise à jour locale (Carte)
+
+          // 📡 ENVOI AU BACKEND (WebSocket)
+          console.log("📡 Envoi position...", latitude, longitude);
+          sendPosition(tour.id, latitude, longitude);
+        }
+      );
+    };
+
+    if (isStarted) {
+      startTracking();
+    }
+
+    // Nettoyage en quittant l'écran
+    return () => {
+      if (locationSubscription) locationSubscription.remove();
+      disconnectSocket();
+    };
+  }, [isStarted, tour.id]); // Se relance si la tournée démarre
 
   const loadClients = async () => {
     try {
-      // On récupère les clients de la tournée via l'API
       const response = await api.get(`/tour-clients/tour/${tour.id}`);
       setClients(response.data);
     } catch (error) {
@@ -29,44 +74,36 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
     }
   };
 
-  const getCurrentLocation = async () => {
-    try {
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
-
-      let location = await Location.getCurrentPositionAsync({});
-      setCurrentLocation(location.coords);
-    } catch (e) {
-      console.log("Erreur GPS", e);
-    }
-  };
-
   // 2. Démarrer la tournée
   const handleStartTour = async () => {
     try {
       await api.patch(`/tours/${tour.id}`, { status: 'IN_PROGRESS' });
       setIsStarted(true);
-      Alert.alert("C'est parti !", "Bonne route. Soyez prudents.");
+      Alert.alert("C'est parti !", "Le suivi GPS est activé.");
     } catch (e) {
       Alert.alert("Erreur", "Impossible de démarrer la tournée");
     }
   };
 
-  // 3. Valider une collecte (Simulé pour le moment)
-  const handleValidate = (clientName: string) => {
+  // 3. Valider une collecte (CORRIGÉ)
+  const handleValidate = (client: any) => {
     if (!isStarted) {
       Alert.alert("Attente", "Veuillez d'abord cliquer sur DÉMARRER LA TOURNÉE");
       return;
     }
-    // Ici, on appellerait l'API 'Collections' (à faire plus tard)
-    Alert.alert("Succès", `Collecte validée pour ${clientName} ! ✅`);
+    
+    // 📡 ENVOI AU BACKEND (WebSocket)
+    sendCollectionUpdate(tour.id, client.id, 'COMPLETED');
+    
+    // Feedback visuel immédiat (Optionnel : on pourrait attendre la réponse du socket)
+    Alert.alert("Succès", `Collecte validée pour ${client.name} ! ✅`);
+    
+    // Pour une meilleure UX, on pourrait aussi mettre à jour la liste locale ici
+    // pour passer la ligne en vert immédiatement sans recharger.
   };
 
   const renderClient = ({ item, index }: any) => {
     const client = item.client;
-    // Récupération sécurisée des coordonnées
-    const coords = client.location?.coordinates; 
-    // Rappel : PostGIS peut renvoyer [lat, lng] ou [lng, lat]. Adaptez si besoin.
     
     return (
       <Card style={[styles.card, index === 0 ? styles.activeCard : null]}>
@@ -75,7 +112,14 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
           subtitle={client.street_address}
           left={(props) => <IconButton {...props} icon="map-marker" />}
           right={(props) => (
-            <IconButton {...props} icon="check-circle" iconColor="green" size={30} onPress={() => handleValidate(client.name)} />
+            <IconButton 
+                {...props} 
+                icon="check-circle" 
+                iconColor="green" 
+                size={30} 
+                // CORRECTION ICI : On passe l'objet 'client' entier, pas juste le nom
+                onPress={() => handleValidate(client)} 
+            />
           )}
         />
       </Card>
@@ -84,9 +128,9 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
 
   return (
     <View style={styles.container}>
-      <Appbar.Header>
+      <Appbar.Header elevated>
         <Appbar.BackAction onPress={onBack} />
-        <Appbar.Content title={tour.name} subtitle={isStarted ? "En cours..." : "Non démarrée"} />
+        <Appbar.Content title={tour.name} subtitle={isStarted ? "🟢 En cours - Suivi actif" : "⚪ Non démarrée"} />
       </Appbar.Header>
 
       {/* --- LA CARTE --- */}
@@ -94,17 +138,18 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
         <MapView
           style={styles.map}
           initialRegion={{
-            latitude: -1.6585, // Goma Centre
-            longitude: 29.2205,
-            latitudeDelta: 0.05,
-            longitudeDelta: 0.05,
+            latitude: currentLocation?.latitude || -1.6585,
+            longitude: currentLocation?.longitude || 29.2205,
+            latitudeDelta: 0.02,
+            longitudeDelta: 0.02,
           }}
           showsUserLocation={true}
         >
           {/* Marqueurs des clients */}
           {clients.map((item, index) => {
              const c = item.client;
-             if(c.location && c.location.coordinates) {
+             // Vérification stricte des coordonnées
+             if(c.location && c.location.coordinates && Array.isArray(c.location.coordinates)) {
                  return (
                     <Marker 
                         key={c.id}
@@ -146,7 +191,7 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
+  container: { flex: 1, backgroundColor: 'white' },
   mapContainer: { height: '40%', width: '100%' },
   map: { width: '100%', height: '100%' },
   listContainer: { flex: 1, backgroundColor: '#f5f5f5' },
