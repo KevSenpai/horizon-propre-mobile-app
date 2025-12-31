@@ -1,56 +1,67 @@
 import { io, Socket } from 'socket.io-client';
-import { api } from '../config/api'; // Pour récupérer l'URL de base
+import { api } from '../config/api';
 
 let socket: Socket | null = null;
 
-// Initialiser la connexion
 export const connectSocket = () => {
-  // On récupère l'URL de l'API (ex: http://192.168.x.x:3000 ou Render)
-  // On enlève juste le '/api' si besoin, mais Socket.io gère ça.
-  // Attention: Socket.io a besoin de l'URL racine (sans le path)
-  const baseUrl = api.defaults.baseURL || '';
+  // On nettoie l'URL pour être sûr (pas de slash à la fin)
+  const baseUrl = api.defaults.baseURL?.replace(/\/$/, '') || '';
   
   if (!socket) {
-    console.log("🔌 Tentative de connexion WebSocket vers:", baseUrl);
+    console.log("🔌 Connexion WebSocket vers:", baseUrl);
     
     socket = io(baseUrl, {
-      transports: ['websocket'], // Force le mode websocket pour la performance
+      // ⚠️ CRUCIAL POUR REACT NATIVE :
+      transports: ['websocket'], // On force WebSocket direct (pas de polling)
       autoConnect: true,
+      reconnection: true,        // Réessayer si ça coupe
+      reconnectionAttempts: 5,   // Max 5 essais
+      reconnectionDelay: 1000,   // Attendre 1s entre les essais
+      forceNew: true,            // Force une nouvelle connexion propre
     });
 
     socket.on('connect', () => {
       console.log('✅ WebSocket Connecté ! ID:', socket?.id);
     });
 
-    socket.on('disconnect', () => {
-      console.log('❌ WebSocket Déconnecté');
+    socket.on('disconnect', (reason) => {
+      console.log('❌ WebSocket Déconnecté. Raison:', reason);
     });
 
     socket.on('connect_error', (err) => {
-      console.error('⚠️ Erreur WebSocket:', err.message);
+      // On log l'erreur pour comprendre (mais on ne crash pas l'app)
+      console.log('⚠️ Erreur WebSocket (Détail):', err.message);
     });
   }
+  
+  // Si le socket existe mais est déconnecté, on le relance
+  if (socket && !socket.connected) {
+    socket.connect();
+  }
+
   return socket;
 };
 
-// Envoyer la position GPS
 export const sendPosition = (tourId: string, lat: number, lng: number) => {
   if (socket && socket.connected) {
+    // Petit log pour vérifier que ça part
+    console.log(`📡 Emit sendPosition: ${lat}, ${lng}`);
     socket.emit('sendPosition', { tourId, lat, lng });
+  } else {
+    console.log("⚠️ Impossible d'envoyer la position : Socket déconnecté");
   }
 };
 
-// Envoyer une mise à jour de collecte
 export const sendCollectionUpdate = (tourId: string, clientId: string, status: string) => {
   if (socket && socket.connected) {
     socket.emit('updateCollectionStatus', { tourId, clientId, status });
   }
 };
 
-// Se déconnecter proprement
 export const disconnectSocket = () => {
   if (socket) {
     socket.disconnect();
-    socket = null;
+    // On ne met pas socket à null ici pour garder l'instance en mémoire 
+    // et éviter de recréer des listeners en boucle si on revient sur l'écran
   }
 };
