@@ -1,67 +1,66 @@
 import React, { useEffect, useState } from 'react';
 import { View, StyleSheet, FlatList, Alert } from 'react-native';
 import { Appbar, Card, Text, Button, IconButton, ActivityIndicator } from 'react-native-paper';
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { api } from '../config/api';
-// Imports WebSocket
 import { connectSocket, disconnectSocket, sendPosition, sendCollectionUpdate } from '../services/socket';
 
 export default function TourExecutionScreen({ tour, onBack }: any) {
   const [clients, setClients] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentLocation, setCurrentLocation] = useState<any>(null);
+  
+  // État local pour savoir si la tournée est active
   const [isStarted, setIsStarted] = useState(tour.status === 'IN_PROGRESS');
 
   // 1. Initialisation (Chargement + WebSocket + GPS)
   useEffect(() => {
     loadClients();
     
-    // Connexion au canal radio (WebSocket)
+    // Connexion WebSocket
     connectSocket();
 
-    // Gestion du GPS en temps réel
     let locationSubscription: Location.LocationSubscription | null = null;
 
     const startTracking = async () => {
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert("Permission refusée", "La géolocalisation est nécessaire pour le suivi.");
+        Alert.alert("Permission refusée", "La géolocalisation est nécessaire.");
         return;
       }
 
-      // On récupère la position initiale
+      // Position initiale
       let initialLocation = await Location.getCurrentPositionAsync({});
       setCurrentLocation(initialLocation.coords);
 
-      // On s'abonne aux changements de position (Tracking)
+      // Tracking temps réel
       locationSubscription = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.High,
-          timeInterval: 10000, // Envoi toutes les 10 secondes
-          distanceInterval: 50, // Ou tous les 50 mètres
+          timeInterval: 10000, // 10 secondes
+          distanceInterval: 50, // 50 mètres
         },
         (location) => {
           const { latitude, longitude } = location.coords;
-          setCurrentLocation(location.coords); // Mise à jour locale (Carte)
+          setCurrentLocation(location.coords);
 
-          // 📡 ENVOI AU BACKEND (WebSocket)
-          console.log("📡 Envoi position...", latitude, longitude);
-          sendPosition(tour.id, latitude, longitude);
+          // 📡 ENVOI SOCKET SI TOURNÉE DÉMARRÉE
+          if (isStarted) {
+             console.log("📡 Envoi position...", latitude, longitude);
+             sendPosition(tour.id, latitude, longitude);
+          }
         }
       );
     };
 
-    if (isStarted) {
-      startTracking();
-    }
+    startTracking();
 
-    // Nettoyage en quittant l'écran
     return () => {
       if (locationSubscription) locationSubscription.remove();
       disconnectSocket();
     };
-  }, [isStarted, tour.id]); // Se relance si la tournée démarre
+  }, [isStarted, tour.id]);
 
   const loadClients = async () => {
     try {
@@ -74,7 +73,7 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
     }
   };
 
-  // 2. Démarrer la tournée
+  // 2. Action : Démarrer la tournée
   const handleStartTour = async () => {
     try {
       await api.patch(`/tours/${tour.id}`, { status: 'IN_PROGRESS' });
@@ -85,21 +84,61 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
     }
   };
 
-  // 3. Valider une collecte (CORRIGÉ)
-  const handleValidate = (client: any) => {
+  // 3. Action : Terminer la tournée (LA CORRECTION EST ICI)
+  const handleFinishTour = async () => {
+    Alert.alert(
+      "Terminer la tournée ?",
+      "Confirmez-vous la fin de la tournée ? Cette action clôturera la mission.",
+      [
+        { text: "Annuler", style: "cancel" },
+        { 
+          text: "Oui, Terminer", 
+          onPress: async () => {
+            try {
+              // Appel API pour passer en COMPLETED
+              await api.patch(`/tours/${tour.id}`, { status: 'COMPLETED' });
+              
+              Alert.alert("Félicitations ! 🎉", "Tournée terminée avec succès.");
+              
+              // Retour à la liste (qui ne l'affichera plus car elle est finie)
+              onBack(); 
+            } catch (e) {
+              console.error(e);
+              Alert.alert("Erreur", "Impossible de terminer la tournée. Vérifiez la connexion.");
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  // 4. Action : Valider une collecte
+  // 4. Action : Valider une collecte (CORRIGÉE ET PERSISTANTE)
+  const handleValidate = async (client: any) => {
     if (!isStarted) {
       Alert.alert("Attente", "Veuillez d'abord cliquer sur DÉMARRER LA TOURNÉE");
       return;
     }
     
-    // 📡 ENVOI AU BACKEND (WebSocket)
-    sendCollectionUpdate(tour.id, client.id, 'COMPLETED');
-    
-    // Feedback visuel immédiat (Optionnel : on pourrait attendre la réponse du socket)
-    Alert.alert("Succès", `Collecte validée pour ${client.name} ! ✅`);
-    
-    // Pour une meilleure UX, on pourrait aussi mettre à jour la liste locale ici
-    // pour passer la ligne en vert immédiatement sans recharger.
+    try {
+        // 1. SAUVEGARDE EN BASE DE DONNÉES (L'étape qui manquait !)
+        await api.post('/collections', {
+            tour_id: tour.id,
+            client_id: client.id,
+            status: 'COMPLETED'
+        });
+
+        // 2. Envoi WebSocket (Pour l'effet visuel immédiat sur le Web)
+        sendCollectionUpdate(tour.id, client.id, 'COMPLETED');
+        
+        Alert.alert("Succès", `Collecte validée pour ${client.name}`);
+
+    } catch (error) {
+        console.error(error);
+        // Même si ça échoue (ex: pas de réseau), on pourrait le stocker en local (SQLite)
+        // Pour le MVP connecté, on affiche une alerte.
+        Alert.alert("Attention", "La sauvegarde a échoué. Vérifiez votre connexion.");
+    }
   };
 
   const renderClient = ({ item, index }: any) => {
@@ -117,7 +156,6 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
                 icon="check-circle" 
                 iconColor="green" 
                 size={30} 
-                // CORRECTION ICI : On passe l'objet 'client' entier, pas juste le nom
                 onPress={() => handleValidate(client)} 
             />
           )}
@@ -130,7 +168,11 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
     <View style={styles.container}>
       <Appbar.Header elevated>
         <Appbar.BackAction onPress={onBack} />
-        <Appbar.Content title={tour.name} subtitle={isStarted ? "🟢 En cours - Suivi actif" : "⚪ Non démarrée"} />
+        <Appbar.Content 
+            title={tour.name} 
+            subtitle={isStarted ? "🟢 En cours" : "⚪ En attente"} 
+            subtitleStyle={{ color: isStarted ? 'green' : 'grey' }}
+        />
       </Appbar.Header>
 
       {/* --- LA CARTE --- */}
@@ -145,11 +187,9 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
           }}
           showsUserLocation={true}
         >
-          {/* Marqueurs des clients */}
           {clients.map((item, index) => {
              const c = item.client;
-             // Vérification stricte des coordonnées
-             if(c.location && c.location.coordinates && Array.isArray(c.location.coordinates)) {
+             if(c.location && c.location.coordinates) {
                  return (
                     <Marker 
                         key={c.id}
@@ -166,17 +206,33 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
         </MapView>
       </View>
 
-      {/* --- LA LISTE --- */}
+      {/* --- LA LISTE ET LES ACTIONS --- */}
       <View style={styles.listContainer}>
         {loading ? (
           <ActivityIndicator style={{marginTop: 20}} />
         ) : (
           <>
-            {!isStarted && (
-                <Button mode="contained" icon="play" style={{margin: 10}} onPress={handleStartTour}>
+            {/* BOUTON DYNAMIQUE : DÉMARRER OU TERMINER */}
+            {!isStarted ? (
+                <Button 
+                    mode="contained" 
+                    icon="play" 
+                    style={{margin: 10, backgroundColor: '#2196F3'}} 
+                    onPress={handleStartTour}
+                >
                     DÉMARRER LA TOURNÉE
                 </Button>
+            ) : (
+                <Button 
+                    mode="contained" 
+                    icon="flag-checkered" 
+                    style={{margin: 10, backgroundColor: 'green'}} 
+                    onPress={handleFinishTour}
+                >
+                    TERMINER LA TOURNÉE
+                </Button>
             )}
+
             <FlatList
               data={clients}
               renderItem={renderClient}
