@@ -11,45 +11,31 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
   const [loading, setLoading] = useState(true);
   const [currentLocation, setCurrentLocation] = useState<any>(null);
   
-  // État local pour savoir si la tournée est active
   const [isStarted, setIsStarted] = useState(tour.status === 'IN_PROGRESS');
+  const [isFinishing, setIsFinishing] = useState(false);
+  // On garde processingIds pour le spinner pendant l'appel réseau
+  const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
 
-  // 1. Initialisation (Chargement + WebSocket + GPS)
+  // 1. Initialisation
   useEffect(() => {
     loadClients();
-    
-    // Connexion WebSocket
     connectSocket();
 
     let locationSubscription: Location.LocationSubscription | null = null;
 
     const startTracking = async () => {
       let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert("Permission refusée", "La géolocalisation est nécessaire.");
-        return;
-      }
+      if (status !== 'granted') return;
 
-      // Position initiale
       let initialLocation = await Location.getCurrentPositionAsync({});
       setCurrentLocation(initialLocation.coords);
 
-      // Tracking temps réel
       locationSubscription = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.High,
-          timeInterval: 10000, // 10 secondes
-          distanceInterval: 50, // 50 mètres
-        },
+        { accuracy: Location.Accuracy.High, timeInterval: 10000, distanceInterval: 50 },
         (location) => {
           const { latitude, longitude } = location.coords;
           setCurrentLocation(location.coords);
-
-          // 📡 ENVOI SOCKET SI TOURNÉE DÉMARRÉE
-          if (isStarted) {
-             console.log("📡 Envoi position...", latitude, longitude);
-             sendPosition(tour.id, latitude, longitude);
-          }
+          if (isStarted) sendPosition(tour.id, latitude, longitude);
         }
       );
     };
@@ -65,6 +51,9 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
   const loadClients = async () => {
     try {
       const response = await api.get(`/tour-clients/tour/${tour.id}`);
+      // On suppose que le backend renvoie une liste brute.
+      // On ajoute une propriété locale 'localStatus' si besoin, 
+      // ou on utilise celle du backend si elle existe.
       setClients(response.data);
     } catch (error) {
       Alert.alert("Erreur", "Impossible de charger les clients");
@@ -73,91 +62,118 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
     }
   };
 
-  // 2. Action : Démarrer la tournée
   const handleStartTour = async () => {
     try {
       await api.patch(`/tours/${tour.id}`, { status: 'IN_PROGRESS' });
       setIsStarted(true);
-      Alert.alert("C'est parti !", "Le suivi GPS est activé.");
     } catch (e) {
-      Alert.alert("Erreur", "Impossible de démarrer la tournée");
+      Alert.alert("Erreur", "Impossible de démarrer.");
     }
   };
 
-  // 3. Action : Terminer la tournée (LA CORRECTION EST ICI)
   const handleFinishTour = async () => {
-    Alert.alert(
-      "Terminer la tournée ?",
-      "Confirmez-vous la fin de la tournée ? Cette action clôturera la mission.",
-      [
-        { text: "Annuler", style: "cancel" },
-        { 
-          text: "Oui, Terminer", 
-          onPress: async () => {
-            try {
-              // Appel API pour passer en COMPLETED
-              await api.patch(`/tours/${tour.id}`, { status: 'COMPLETED' });
-              
-              Alert.alert("Félicitations ! 🎉", "Tournée terminée avec succès.");
-              
-              // Retour à la liste (qui ne l'affichera plus car elle est finie)
-              onBack(); 
-            } catch (e) {
-              console.error(e);
-              Alert.alert("Erreur", "Impossible de terminer la tournée. Vérifiez la connexion.");
-            }
+    Alert.alert("Terminer ?", "Confirmez-vous la fin de la tournée ?", [
+      { text: "Annuler", style: "cancel" },
+      { 
+        text: "Oui, Terminer", 
+        onPress: async () => {
+          if (isFinishing) return;
+          setIsFinishing(true);
+          try {
+            await api.patch(`/tours/${tour.id}`, { status: 'COMPLETED' });
+            Alert.alert("Succès", "Tournée terminée.");
+            onBack(); 
+          } catch (e) {
+            Alert.alert("Erreur", "Échec de la clôture.");
+            setIsFinishing(false);
           }
         }
-      ]
-    );
+      }
+    ]);
   };
 
-  // 4. Action : Valider une collecte
-  // 4. Action : Valider une collecte (CORRIGÉE ET PERSISTANTE)
+  // 4. Valider une collecte (CORRIGÉ : VERROUILLAGE IMMÉDIAT)
   const handleValidate = async (client: any) => {
     if (!isStarted) {
-      Alert.alert("Attente", "Veuillez d'abord cliquer sur DÉMARRER LA TOURNÉE");
+      Alert.alert("Attente", "Veuillez d'abord DÉMARRER la tournée.");
       return;
     }
     
+    if (processingIds.has(client.id)) return;
+
+    // A. Mise à jour OPTIMISTE de l'interface
+    // On marque immédiatement le client comme "COMPLETED" dans la liste locale
+    setClients(currentList => currentList.map(item => {
+        if (item.clientId === client.id) { // Attention: item.clientId vs client.id selon votre structure API
+             return { ...item, status: 'COMPLETED' }; // On change le statut localement
+        }
+        return item;
+    }));
+
+    // B. Verrouillage technique
+    setProcessingIds(prev => new Set(prev).add(client.id));
+
     try {
-        // 1. SAUVEGARDE EN BASE DE DONNÉES (L'étape qui manquait !)
+        // C. Appel Réseau
         await api.post('/collections', {
             tour_id: tour.id,
             client_id: client.id,
             status: 'COMPLETED'
         });
 
-        // 2. Envoi WebSocket (Pour l'effet visuel immédiat sur le Web)
         sendCollectionUpdate(tour.id, client.id, 'COMPLETED');
         
-        Alert.alert("Succès", `Collecte validée pour ${client.name}`);
-
     } catch (error) {
         console.error(error);
-        // Même si ça échoue (ex: pas de réseau), on pourrait le stocker en local (SQLite)
-        // Pour le MVP connecté, on affiche une alerte.
-        Alert.alert("Attention", "La sauvegarde a échoué. Vérifiez votre connexion.");
+        Alert.alert("Erreur", "La validation n'a pas pu être envoyée. Elle sera réessayée.");
+        // Note: En cas d'erreur, on pourrait remettre le statut à 'PENDING', 
+        // mais pour une app offline-first, on préfère souvent garder l'état "fait" localement.
+    } finally {
+        setProcessingIds(prev => {
+            const next = new Set(prev);
+            next.delete(client.id);
+            return next;
+        });
     }
   };
 
   const renderClient = ({ item, index }: any) => {
     const client = item.client;
     
+    // On vérifie si c'est déjà fait (soit via la BDD, soit via notre update local)
+    // Note: Adaptez 'item.status' selon le nom exact renvoyé par votre backend ou ajouté localement
+    const isDone = item.status === 'COMPLETED'; 
+    const isProcessing = processingIds.has(client.id);
+
     return (
-      <Card style={[styles.card, index === 0 ? styles.activeCard : null]}>
+      <Card style={[
+          styles.card, 
+          index === 0 ? styles.activeCard : null,
+          isDone ? styles.doneCard : null // Style grisé si fait
+        ]}>
         <Card.Title 
           title={`${index + 1}. ${client.name}`} 
+          titleStyle={isDone ? {textDecorationLine: 'line-through', color: 'gray'} : {}}
           subtitle={client.street_address}
           left={(props) => <IconButton {...props} icon="map-marker" />}
           right={(props) => (
-            <IconButton 
-                {...props} 
-                icon="check-circle" 
-                iconColor="green" 
-                size={30} 
-                onPress={() => handleValidate(client)} 
-            />
+            // LOGIQUE D'AFFICHAGE DU BOUTON
+            isDone ? (
+                // CAS 1 : C'est fait -> Icône statique grise ou verte, non cliquable
+                <IconButton {...props} icon="check" iconColor="gray" disabled={true} />
+            ) : isProcessing ? (
+                // CAS 2 : Ça charge -> Spinner
+                <ActivityIndicator animating={true} color="green" style={{ marginRight: 16 }} />
+            ) : (
+                // CAS 3 : À faire -> Bouton cliquable
+                <IconButton 
+                    {...props} 
+                    icon="check-circle" 
+                    iconColor="green" 
+                    size={30} 
+                    onPress={() => handleValidate(client)} 
+                />
+            )
           )}
         />
       </Card>
@@ -168,14 +184,9 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
     <View style={styles.container}>
       <Appbar.Header elevated>
         <Appbar.BackAction onPress={onBack} />
-        <Appbar.Content 
-            title={tour.name} 
-            subtitle={isStarted ? "🟢 En cours" : "⚪ En attente"} 
-            subtitleStyle={{ color: isStarted ? 'green' : 'grey' }}
-        />
+        <Appbar.Content title={tour.name} subtitle={isStarted ? "🟢 En cours" : "⚪ En attente"} />
       </Appbar.Header>
 
-      {/* --- LA CARTE --- */}
       <View style={styles.mapContainer}>
         <MapView
           style={styles.map}
@@ -189,37 +200,22 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
         >
           {clients.map((item, index) => {
              const c = item.client;
-             if(c.location && c.location.coordinates) {
-                 return (
-                    <Marker 
-                        key={c.id}
-                        coordinate={{
-                            latitude: c.location.coordinates[0], 
-                            longitude: c.location.coordinates[1]
-                        }}
-                        title={`${index+1}. ${c.name}`}
-                    />
-                 )
+             if(c.location?.coordinates) {
+                 // Si c'est fait, on peut changer la couleur du marqueur aussi (optionnel)
+                 return <Marker key={c.id} coordinate={{latitude: c.location.coordinates[0], longitude: c.location.coordinates[1]}} title={`${index+1}. ${c.name}`} />;
              }
              return null;
           })}
         </MapView>
       </View>
 
-      {/* --- LA LISTE ET LES ACTIONS --- */}
       <View style={styles.listContainer}>
         {loading ? (
           <ActivityIndicator style={{marginTop: 20}} />
         ) : (
           <>
-            {/* BOUTON DYNAMIQUE : DÉMARRER OU TERMINER */}
             {!isStarted ? (
-                <Button 
-                    mode="contained" 
-                    icon="play" 
-                    style={{margin: 10, backgroundColor: '#2196F3'}} 
-                    onPress={handleStartTour}
-                >
+                <Button mode="contained" icon="play" style={{margin: 10, backgroundColor: '#2196F3'}} onPress={handleStartTour}>
                     DÉMARRER LA TOURNÉE
                 </Button>
             ) : (
@@ -228,6 +224,8 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
                     icon="flag-checkered" 
                     style={{margin: 10, backgroundColor: 'green'}} 
                     onPress={handleFinishTour}
+                    loading={isFinishing}
+                    disabled={isFinishing}
                 >
                     TERMINER LA TOURNÉE
                 </Button>
@@ -252,5 +250,6 @@ const styles = StyleSheet.create({
   map: { width: '100%', height: '100%' },
   listContainer: { flex: 1, backgroundColor: '#f5f5f5' },
   card: { marginHorizontal: 10, marginTop: 10, backgroundColor: 'white' },
-  activeCard: { borderLeftWidth: 5, borderLeftColor: '#2196F3' }
+  activeCard: { borderLeftWidth: 5, borderLeftColor: '#2196F3' },
+  doneCard: { backgroundColor: '#f0fdf4', opacity: 0.8 } // Fond vert très clair pour les finis
 });

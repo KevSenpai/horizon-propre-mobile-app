@@ -12,6 +12,14 @@ export default function HomeScreen({ onLogout, onSelectTour }: any) {
 
   // Charger le nom de l'équipe et les tournées
   const loadData = async () => {
+    // ...
+      const response = await api.get('/tours');
+      
+      // MODIFICATION : On affiche TOUT si on est admin (pour tester)
+      const myTours = response.data.filter((t: any) => 
+        ['PLANNED', 'IN_PROGRESS'].includes(t.status)
+      );
+      // ...
     try {
       const name = await AsyncStorage.getItem('team_name');
       const teamId = await AsyncStorage.getItem('team_id');

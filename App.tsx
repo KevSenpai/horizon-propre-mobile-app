@@ -1,44 +1,62 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { StyleSheet, View, Alert } from 'react-native';
-import { Provider as PaperProvider, TextInput, Button, Text, ActivityIndicator } from 'react-native-paper';
+import { Provider as PaperProvider, TextInput, Button, Text } from 'react-native-paper';
 import { api } from './src/config/api';
-import HomeScreen from './src/screens/HomeScreen';
-import TourExecutionScreen from './src/screens/TourExecutionScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import HomeScreen from './src/screens/HomeScreen';
+import TeamSelectionScreen from './src/screens/TeamSelectionScreen'; // <--- IMPORT
+import TourExecutionScreen from './src/screens/TourExecutionScreen';
 
 export default function App() {
-  const [teamName, setTeamName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  
+  // États de navigation
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [selectedTour, setSelectedTour] = useState<any>(null)
-  const handleLogin = async () => {
-    if (!teamName) {
-      Alert.alert("Erreur", "Veuillez entrer le nom de l'équipe");
-      return;
-    }
+  const [hasTeamSelected, setHasTeamSelected] = useState(false);
+  const [selectedTour, setSelectedTour] = useState<any>(null);
 
+  // Vérifier l'état au lancement
+  useEffect(() => {
+    checkLoginStatus();
+  }, []);
+
+  const checkLoginStatus = async () => {
+    const token = await AsyncStorage.getItem('access_token');
+    const teamId = await AsyncStorage.getItem('team_id');
+    
+    if (token) {
+        setIsLoggedIn(true);
+        if (teamId) {
+            setHasTeamSelected(true);
+        }
+    }
+  };
+
+  const handleLogin = async () => {
     setLoading(true);
     try {
-      // 1. On récupère la liste des équipes (MVP : on filtre côté client)
-      const response = await api.get('/teams');
-      const teams = response.data;
+      const response = await api.post('/auth/login', {
+        email: email.trim().toLowerCase(),
+        password: password.trim()
+      });
 
-      // 2. On cherche l'équipe
-      const team = teams.find((t: any) => t.name === teamName && t.status === 'ACTIVE');
+      const { access_token } = response.data;
 
-      if (team) {
-        // Succès !
-        await AsyncStorage.setItem('team_id', team.id);
-        await AsyncStorage.setItem('team_name', team.name);
-        setIsLoggedIn(true);
-        Alert.alert("Succès", `Bienvenue ${team.name} ! 🚛`);
-      } else {
-        Alert.alert("Erreur", "Équipe introuvable ou inactive.");
-      }
-    } catch (error) {
+      // On stocke le token générique
+      await AsyncStorage.setItem('access_token', access_token);
+      
+      // On nettoie toute vieille sélection d'équipe
+      await AsyncStorage.removeItem('team_id');
+      await AsyncStorage.removeItem('team_name');
+      
+      setIsLoggedIn(true);
+      setHasTeamSelected(false); // On force la sélection
+
+    } catch (error: any) {
       console.error(error);
-      Alert.alert("Erreur Réseau", "Impossible de contacter le serveur. Vérifiez l'IP.");
+      Alert.alert("Erreur", "Email ou mot de passe incorrect.");
     } finally {
       setLoading(false);
     }
@@ -47,48 +65,70 @@ export default function App() {
   const handleLogout = async () => {
     await AsyncStorage.clear();
     setIsLoggedIn(false);
-    setTeamName('');
+    setHasTeamSelected(false);
+    setSelectedTour(null);
+    setEmail('');
+    setPassword('');
   };
 
-  // --- ÉCRAN D'ACCUEIL (Après Login) ---
-  // --- ÉCRAN D'ACCUEIL ---
-  if (isLoggedIn) {
-      // Cas 1 : Une tournée est sélectionnée -> On affiche l'écran d'exécution
-      if (selectedTour) {
-        return (
-          <PaperProvider>
-            <TourExecutionScreen 
-              tour={selectedTour} 
-              onBack={() => setSelectedTour(null)} // Retour à la liste
-            />
-          </PaperProvider>
-        );
-      }
+  const handleChangeTeam = async () => {
+      // Permet de revenir à la sélection d'équipe sans se déconnecter totalement
+      await AsyncStorage.removeItem('team_id');
+      setHasTeamSelected(false);
+      setSelectedTour(null);
+  };
 
-      // Cas 2 : Pas de tournée -> On affiche la liste (HomeScreen)
+  // --- 1. ROUTAGE : ÉCRAN DE TRAVAIL (CARTE/LISTE) ---
+  if (isLoggedIn && hasTeamSelected && selectedTour) {
       return (
         <PaperProvider>
-          <HomeScreen 
-            onLogout={handleLogout} 
-            onSelectTour={(tour: any) => setSelectedTour(tour)} // On sélectionne la tournée
-          />
+            <TourExecutionScreen 
+              tour={selectedTour} 
+              onBack={() => setSelectedTour(null)} 
+            />
         </PaperProvider>
       );
-    }
+  }
 
-  // --- ÉCRAN DE LOGIN ---
+  // --- 2. ROUTAGE : ACCUEIL (LISTE DES TOURNÉES DE L'ÉQUIPE) ---
+  if (isLoggedIn && hasTeamSelected) {
+    return (
+      <PaperProvider>
+        <HomeScreen 
+          onLogout={handleChangeTeam} // Le bouton logout renvoie au choix d'équipe
+          onSelectTour={setSelectedTour} 
+        />
+      </PaperProvider>
+    );
+  }
+
+  // --- 3. ROUTAGE : SÉLECTION D'ÉQUIPE (NOUVEAU) ---
+  if (isLoggedIn && !hasTeamSelected) {
+      return (
+          <PaperProvider>
+              <TeamSelectionScreen 
+                  onTeamSelected={() => setHasTeamSelected(true)}
+                  onLogout={handleLogout}
+              />
+          </PaperProvider>
+      );
+  }
+
+  // --- 4. ROUTAGE : LOGIN ---
   return (
     <PaperProvider>
       <View style={styles.container}>
-        <Text variant="headlineLarge" style={styles.title}>Horizon Mobile 🌍</Text>
+        <Text variant="headlineLarge" style={styles.title}>Horizon Mobile 🚛</Text>
+        <Text style={{marginBottom: 20, color: 'gray'}}>Accès Terrain</Text>
         
         <TextInput
-          label="Nom de l'équipe"
-          value={teamName}
-          onChangeText={setTeamName}
+          label="Email commun"
+          value={email}
+          onChangeText={setEmail}
           mode="outlined"
           style={styles.input}
-          placeholder="Ex: Equipe Alpha"
+          autoCapitalize="none"
+          keyboardType="email-address"
         />
         
         <TextInput
@@ -115,25 +155,8 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 20,
-  },
-  title: {
-    marginBottom: 40,
-    fontWeight: 'bold',
-    color: '#2196F3',
-  },
-  input: {
-    width: '100%',
-    marginBottom: 15,
-  },
-  button: {
-    width: '100%',
-    marginTop: 10,
-    paddingVertical: 5,
-  },
+  container: { flex: 1, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', padding: 20 },
+  title: { marginBottom: 10, fontWeight: 'bold', color: '#2196F3' },
+  input: { width: '100%', marginBottom: 15 },
+  button: { width: '100%', marginTop: 10, paddingVertical: 5 },
 });
