@@ -5,7 +5,7 @@ import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { api } from '../config/api';
 import { connectSocket, disconnectSocket, sendPosition, sendCollectionUpdate } from '../services/socket';
-
+import AsyncStorage from '@react-native-async-storage/async-storage';
 export default function TourExecutionScreen({ tour, onBack }: any) {
   const [clients, setClients] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,15 +48,35 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
     };
   }, [isStarted, tour.id]);
 
+  // ... import AsyncStorage ...
+
   const loadClients = async () => {
     try {
-      const response = await api.get(`/tour-clients/tour/${tour.id}`);
-      // On suppose que le backend renvoie une liste brute.
-      // On ajoute une propriété locale 'localStatus' si besoin, 
-      // ou on utilise celle du backend si elle existe.
-      setClients(response.data);
+      // Clé unique pour cette tournée
+      const cacheKey = `tour_clients_${tour.id}`;
+
+      try {
+          // 1. Essai Réseau
+          const response = await api.get(`/tour-clients/tour/${tour.id}`);
+          setClients(response.data);
+          
+          // 2. Sauvegarde Cache
+          await AsyncStorage.setItem(cacheKey, JSON.stringify(response.data));
+
+      } catch (networkError) {
+          console.log("Mode Hors-ligne activé pour le détail");
+          
+          // 3. Fallback Cache
+          const cached = await AsyncStorage.getItem(cacheKey);
+          if (cached) {
+              setClients(JSON.parse(cached));
+              Alert.alert("Hors-ligne", "Vous travaillez sur une version sauvegardée.");
+          } else {
+              throw networkError;
+          }
+      }
     } catch (error) {
-      Alert.alert("Erreur", "Impossible de charger les clients");
+      Alert.alert("Erreur", "Impossible de charger les clients (Pas de connexion et pas de cache).");
     } finally {
       setLoading(false);
     }

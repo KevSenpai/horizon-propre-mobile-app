@@ -21,21 +21,35 @@ export default function HomeScreen({ onLogout, onSelectTour }: any) {
       );
       // ...
     try {
+      // 1. Charger le contexte (Nom équipe...)
       const name = await AsyncStorage.getItem('team_name');
       const teamId = await AsyncStorage.getItem('team_id');
       setTeamName(name || '');
 
-      // Récupérer TOUTES les tournées
-      const response = await api.get('/tours');
-      
-      // Filtrer côté client pour le MVP (Idéalement, filtrer côté serveur)
-      // On garde les tournées de MON équipe qui sont PLANIFIÉES ou EN COURS
-      const myTours = response.data.filter((t: any) => 
-        (t.team?.id === teamId || t.team_id === teamId) && 
-        ['PLANNED', 'IN_PROGRESS'].includes(t.status)
-      );
+      // 2. Essayer de charger depuis le Réseau
+      try {
+          const response = await api.get('/tours');
+          const myTours = response.data.filter((t: any) => 
+            (t.team?.id === teamId || t.team_id === teamId) && 
+            ['PLANNED', 'IN_PROGRESS'].includes(t.status)
+          );
+          
+          setTours(myTours);
+          // --- SAUVEGARDE EN CACHE (OFFLINE) ---
+          await AsyncStorage.setItem('cached_tours', JSON.stringify(myTours));
+    } catch (networkError) {
+          console.log("Mode Hors-ligne activé pour la liste");
+          
+          // 3. Si Réseau échoue, charger depuis le CACHE
+          const cached = await AsyncStorage.getItem('cached_tours');
+          if (cached) {
+              setTours(JSON.parse(cached));
+              alert("Mode Hors-ligne : Affichage des données sauvegardées.");
+          } else {
+              throw networkError; // Vraie erreur si rien en cache
+          }
+      }
 
-      setTours(myTours);
     } catch (error) {
       console.error(error);
     } finally {
