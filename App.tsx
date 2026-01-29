@@ -6,12 +6,12 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import HomeScreen from './src/screens/HomeScreen';
 import TeamSelectionScreen from './src/screens/TeamSelectionScreen'; // <--- IMPORT
 import TourExecutionScreen from './src/screens/TourExecutionScreen';
-
+import HistoryScreen from './src/screens/HistoryScreen';
 export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  
+  const [showHistory, setShowHistory] = useState(false);
   // États de navigation
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [hasTeamSelected, setHasTeamSelected] = useState(false);
@@ -69,7 +69,10 @@ export default function App() {
     setSelectedTour(null);
     setEmail('');
     setPassword('');
+    setShowHistory(false);
   };
+
+  
 
   const handleChangeTeam = async () => {
       // Permet de revenir à la sélection d'équipe sans se déconnecter totalement
@@ -77,6 +80,14 @@ export default function App() {
       setHasTeamSelected(false);
       setSelectedTour(null);
   };
+
+  if (isLoggedIn && hasTeamSelected && showHistory) {
+      return (
+        <PaperProvider>
+            <HistoryScreen onBack={() => setShowHistory(false)} />
+        </PaperProvider>
+      );
+  }
 
   // --- 1. ROUTAGE : ÉCRAN DE TRAVAIL (CARTE/LISTE) ---
   if (isLoggedIn && hasTeamSelected && selectedTour) {
@@ -97,6 +108,7 @@ export default function App() {
         <HomeScreen 
           onLogout={handleChangeTeam} // Le bouton logout renvoie au choix d'équipe
           onSelectTour={setSelectedTour} 
+          onShowHistory={() => setShowHistory(true)}
         />
       </PaperProvider>
     );

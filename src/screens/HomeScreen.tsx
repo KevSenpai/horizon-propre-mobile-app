@@ -4,52 +4,31 @@ import { Appbar, Card, Text, Badge, Button, ActivityIndicator } from 'react-nati
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../config/api';
 
-export default function HomeScreen({ onLogout, onSelectTour }: any) {
+// CORRECTION ICI : onShowHistory est ajouté dans les paramètres
+export default function HomeScreen({ onLogout, onSelectTour, onShowHistory }: any) {
   const [tours, setTours] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [teamName, setTeamName] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  // Charger le nom de l'équipe et les tournées
   const loadData = async () => {
-    // ...
-      const response = await api.get('/tours');
-      
-      // MODIFICATION : On affiche TOUT si on est admin (pour tester)
-      const myTours = response.data.filter((t: any) => 
-        ['PLANNED', 'IN_PROGRESS'].includes(t.status)
-      );
-      // ...
     try {
-      // 1. Charger le contexte (Nom équipe...)
       const name = await AsyncStorage.getItem('team_name');
       const teamId = await AsyncStorage.getItem('team_id');
       setTeamName(name || '');
 
-      // 2. Essayer de charger depuis le Réseau
       try {
           const response = await api.get('/tours');
           const myTours = response.data.filter((t: any) => 
             (t.team?.id === teamId || t.team_id === teamId) && 
             ['PLANNED', 'IN_PROGRESS'].includes(t.status)
           );
-          
           setTours(myTours);
-          // --- SAUVEGARDE EN CACHE (OFFLINE) ---
           await AsyncStorage.setItem('cached_tours', JSON.stringify(myTours));
-    } catch (networkError) {
-          console.log("Mode Hors-ligne activé pour la liste");
-          
-          // 3. Si Réseau échoue, charger depuis le CACHE
+      } catch (networkError) {
           const cached = await AsyncStorage.getItem('cached_tours');
-          if (cached) {
-              setTours(JSON.parse(cached));
-              alert("Mode Hors-ligne : Affichage des données sauvegardées.");
-          } else {
-              throw networkError; // Vraie erreur si rien en cache
-          }
+          if (cached) setTours(JSON.parse(cached));
       }
-
     } catch (error) {
       console.error(error);
     } finally {
@@ -58,14 +37,8 @@ export default function HomeScreen({ onLogout, onSelectTour }: any) {
     }
   };
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const onRefresh = () => {
-    setRefreshing(true);
-    loadData();
-  };
+  useEffect(() => { loadData(); }, []);
+  const onRefresh = () => { setRefreshing(true); loadData(); };
 
   const renderTour = ({ item }: { item: any }) => (
     <Card style={styles.card} mode="elevated">
@@ -89,13 +62,13 @@ export default function HomeScreen({ onLogout, onSelectTour }: any) {
     <View style={styles.container}>
       <Appbar.Header elevated>
         <Appbar.Content title="Mes Tournées" subtitle={`Équipe : ${teamName}`} />
+        {/* LE BOUTON EST ICI */}
+        <Appbar.Action icon="history" onPress={onShowHistory} />
         <Appbar.Action icon="logout" onPress={onLogout} />
       </Appbar.Header>
 
       {loading ? (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" />
-        </View>
+        <View style={styles.center}><ActivityIndicator size="large" /></View>
       ) : (
         <FlatList
           data={tours}
