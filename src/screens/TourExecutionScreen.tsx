@@ -1,22 +1,22 @@
 import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, FlatList, Alert } from 'react-native';
+import { View, StyleSheet, FlatList, Alert, Linking, Platform } from 'react-native';
 import { Appbar, Card, Text, Button, IconButton, ActivityIndicator } from 'react-native-paper';
-import MapView, { Marker } from 'react-native-maps';
+import MapView, { Marker, Polyline } from 'react-native-maps'; // Ajout de Polyline
 import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../config/api';
 import { connectSocket, disconnectSocket, sendPosition, sendCollectionUpdate } from '../services/socket';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+
 export default function TourExecutionScreen({ tour, onBack }: any) {
   const [clients, setClients] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentLocation, setCurrentLocation] = useState<any>(null);
-  
+  const [routeCoordinates, setRouteCoordinates] = useState<any[]>([]); // Pour le tracé bleu
+
   const [isStarted, setIsStarted] = useState(tour.status === 'IN_PROGRESS');
   const [isFinishing, setIsFinishing] = useState(false);
-  // On garde processingIds pour le spinner pendant l'appel réseau
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
 
-  // 1. Initialisation
   useEffect(() => {
     loadClients();
     connectSocket();
@@ -48,37 +48,51 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
     };
   }, [isStarted, tour.id]);
 
-  // ... import AsyncStorage ...
-
   const loadClients = async () => {
     try {
-      // Clé unique pour cette tournée
       const cacheKey = `tour_clients_${tour.id}`;
+      let data = [];
 
       try {
-          // 1. Essai Réseau
-          const response = await api.get(`/tour-clients/tour/${tour.id}`);
-          setClients(response.data);
-          
-          // 2. Sauvegarde Cache
-          await AsyncStorage.setItem(cacheKey, JSON.stringify(response.data));
-
+        const response = await api.get(`/tour-clients/tour/${tour.id}`);
+        data = response.data;
+        await AsyncStorage.setItem(cacheKey, JSON.stringify(data));
       } catch (networkError) {
-          console.log("Mode Hors-ligne activé pour le détail");
-          
-          // 3. Fallback Cache
-          const cached = await AsyncStorage.getItem(cacheKey);
-          if (cached) {
-              setClients(JSON.parse(cached));
-              Alert.alert("Hors-ligne", "Vous travaillez sur une version sauvegardée.");
-          } else {
-              throw networkError;
-          }
+        console.log("Offline mode for details");
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (cached) data = JSON.parse(cached);
       }
+
+      setClients(data);
+
+      // Préparer les coordonnées pour la ligne bleue (Polyline)
+      const coords = data
+        .filter((item: any) => item.client.location && item.client.location.coordinates)
+        .map((item: any) => ({
+            // ATTENTION : GeoJSON est [Long, Lat], MapView veut {latitude, longitude}
+            latitude: item.client.location.coordinates[1],
+            longitude: item.client.location.coordinates[0],
+        }));
+      setRouteCoordinates(coords);
+
     } catch (error) {
-      Alert.alert("Erreur", "Impossible de charger les clients (Pas de connexion et pas de cache).");
+      Alert.alert("Erreur", "Impossible de charger les clients");
     } finally {
       setLoading(false);
+    }
+  };
+
+  // --- NOUVELLE FONCTION : OUVRIR GOOGLE MAPS ---
+  const openMaps = (lat: number, lng: number, label: string) => {
+    const scheme = Platform.select({ ios: 'maps:0,0?q=', android: 'geo:0,0?q=' });
+    const latLng = `${lat},${lng}`;
+    const url = Platform.select({
+      ios: `${scheme}${label}@${latLng}`,
+      android: `${scheme}${latLng}(${label})`
+    });
+
+    if (url) {
+        Linking.openURL(url);
     }
   };
 
@@ -86,113 +100,74 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
     try {
       await api.patch(`/tours/${tour.id}`, { status: 'IN_PROGRESS' });
       setIsStarted(true);
-    } catch (e) {
-      Alert.alert("Erreur", "Impossible de démarrer.");
-    }
+    } catch (e) { Alert.alert("Erreur", "Impossible de démarrer."); }
   };
 
   const handleFinishTour = async () => {
-    Alert.alert("Terminer ?", "Confirmez-vous la fin de la tournée ?", [
+    Alert.alert("Terminer ?", "Confirmer la fin ?", [
       { text: "Annuler", style: "cancel" },
-      { 
-        text: "Oui, Terminer", 
-        onPress: async () => {
+      { text: "Oui", onPress: async () => {
           if (isFinishing) return;
           setIsFinishing(true);
           try {
             await api.patch(`/tours/${tour.id}`, { status: 'COMPLETED' });
-            Alert.alert("Succès", "Tournée terminée.");
             onBack(); 
-          } catch (e) {
-            Alert.alert("Erreur", "Échec de la clôture.");
-            setIsFinishing(false);
-          }
+          } catch (e) { setIsFinishing(false); }
         }
       }
     ]);
   };
 
-  // 4. Valider une collecte (CORRIGÉ : VERROUILLAGE IMMÉDIAT)
   const handleValidate = async (client: any) => {
     if (!isStarted) {
       Alert.alert("Attente", "Veuillez d'abord DÉMARRER la tournée.");
       return;
     }
-    
     if (processingIds.has(client.id)) return;
 
-    // A. Mise à jour OPTIMISTE de l'interface
-    // On marque immédiatement le client comme "COMPLETED" dans la liste locale
-    setClients(currentList => currentList.map(item => {
-        if (item.clientId === client.id) { // Attention: item.clientId vs client.id selon votre structure API
-             return { ...item, status: 'COMPLETED' }; // On change le statut localement
-        }
-        return item;
-    }));
-
-    // B. Verrouillage technique
+    setClients(prev => prev.map(item => item.clientId === client.id ? { ...item, status: 'COMPLETED' } : item));
     setProcessingIds(prev => new Set(prev).add(client.id));
 
     try {
-        // C. Appel Réseau
-        await api.post('/collections', {
-            tour_id: tour.id,
-            client_id: client.id,
-            status: 'COMPLETED'
-        });
-
+        await api.post('/collections', { tour_id: tour.id, client_id: client.id, status: 'COMPLETED' });
         sendCollectionUpdate(tour.id, client.id, 'COMPLETED');
-        
-    } catch (error) {
-        console.error(error);
-        Alert.alert("Erreur", "La validation n'a pas pu être envoyée. Elle sera réessayée.");
-        // Note: En cas d'erreur, on pourrait remettre le statut à 'PENDING', 
-        // mais pour une app offline-first, on préfère souvent garder l'état "fait" localement.
-    } finally {
-        setProcessingIds(prev => {
-            const next = new Set(prev);
-            next.delete(client.id);
-            return next;
-        });
+    } catch (error) { console.error(error); } 
+    finally {
+        setProcessingIds(prev => { const n = new Set(prev); n.delete(client.id); return n; });
     }
   };
 
   const renderClient = ({ item, index }: any) => {
     const client = item.client;
-    
-    // On vérifie si c'est déjà fait (soit via la BDD, soit via notre update local)
-    // Note: Adaptez 'item.status' selon le nom exact renvoyé par votre backend ou ajouté localement
     const isDone = item.status === 'COMPLETED'; 
     const isProcessing = processingIds.has(client.id);
+    
+    // Récupération sécurisée des coordonnées
+    const hasGPS = client.location && client.location.coordinates;
+    const lat = hasGPS ? client.location.coordinates[1] : null;
+    const lng = hasGPS ? client.location.coordinates[0] : null;
 
     return (
-      <Card style={[
-          styles.card, 
-          index === 0 ? styles.activeCard : null,
-          isDone ? styles.doneCard : null // Style grisé si fait
-        ]}>
+      <Card style={[styles.card, isDone ? styles.doneCard : null]}>
         <Card.Title 
           title={`${index + 1}. ${client.name}`} 
           titleStyle={isDone ? {textDecorationLine: 'line-through', color: 'gray'} : {}}
           subtitle={client.street_address}
-          left={(props) => <IconButton {...props} icon="map-marker" />}
+          // --- CORRECTION : BOUTON MAPS À GAUCHE ---
+          left={(props) => (
+             hasGPS ? (
+                <IconButton {...props} icon="google-maps" iconColor="#4285F4" onPress={() => openMaps(lat, lng, client.name)} />
+             ) : (
+                <IconButton {...props} icon="map-marker-off" iconColor="gray" />
+             )
+          )}
           right={(props) => (
-            // LOGIQUE D'AFFICHAGE DU BOUTON
             isDone ? (
-                // CAS 1 : C'est fait -> Icône statique grise ou verte, non cliquable
-                <IconButton {...props} icon="check" iconColor="gray" disabled={true} />
+                <IconButton {...props} icon="check" iconColor="gray" disabled />
             ) : isProcessing ? (
-                // CAS 2 : Ça charge -> Spinner
-                <ActivityIndicator animating={true} color="green" style={{ marginRight: 16 }} />
+                <ActivityIndicator animating color="green" style={{ marginRight: 16 }} />
             ) : (
-                // CAS 3 : À faire -> Bouton cliquable
-                <IconButton 
-                    {...props} 
-                    icon="check-circle" 
-                    iconColor="green" 
-                    size={30} 
-                    onPress={() => handleValidate(client)} 
-                />
+                <IconButton {...props} icon="check-circle" iconColor="green" size={30} onPress={() => handleValidate(client)} />
             )
           )}
         />
@@ -211,18 +186,31 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
         <MapView
           style={styles.map}
           initialRegion={{
-            latitude: currentLocation?.latitude || -1.6585,
-            longitude: currentLocation?.longitude || 29.2205,
-            latitudeDelta: 0.02,
-            longitudeDelta: 0.02,
+            // On centre sur le premier client ou Goma par défaut
+            latitude: routeCoordinates.length > 0 ? routeCoordinates[0].latitude : -1.6585,
+            longitude: routeCoordinates.length > 0 ? routeCoordinates[0].longitude : 29.2205,
+            latitudeDelta: 0.05,
+            longitudeDelta: 0.05,
           }}
           showsUserLocation={true}
         >
+          {/* LIGNE BLEUE (ITINÉRAIRE) */}
+          <Polyline coordinates={routeCoordinates} strokeColor="#2196F3" strokeWidth={4} />
+
+          {/* MARQUEURS */}
           {clients.map((item, index) => {
              const c = item.client;
              if(c.location?.coordinates) {
-                 // Si c'est fait, on peut changer la couleur du marqueur aussi (optionnel)
-                 return <Marker key={c.id} coordinate={{latitude: c.location.coordinates[0], longitude: c.location.coordinates[1]}} title={`${index+1}. ${c.name}`} />;
+                 // Inversion [1] = Lat, [0] = Lon pour Leaflet/GoogleMaps
+                 return (
+                    <Marker 
+                        key={c.id} 
+                        coordinate={{latitude: c.location.coordinates[1], longitude: c.location.coordinates[0]}} 
+                        title={`${index+1}. ${c.name}`}
+                        description={item.status === 'COMPLETED' ? "✅ Fait" : "À faire"}
+                        pinColor={item.status === 'COMPLETED' ? 'green' : 'red'}
+                    />
+                 );
              }
              return null;
           })}
@@ -266,10 +254,9 @@ export default function TourExecutionScreen({ tour, onBack }: any) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'white' },
-  mapContainer: { height: '40%', width: '100%' },
+  mapContainer: { height: '45%', width: '100%' }, // J'ai agrandi un peu la carte
   map: { width: '100%', height: '100%' },
   listContainer: { flex: 1, backgroundColor: '#f5f5f5' },
   card: { marginHorizontal: 10, marginTop: 10, backgroundColor: 'white' },
-  activeCard: { borderLeftWidth: 5, borderLeftColor: '#2196F3' },
-  doneCard: { backgroundColor: '#f0fdf4', opacity: 0.8 } // Fond vert très clair pour les finis
+  doneCard: { backgroundColor: '#f0fdf4', opacity: 0.8 }
 });

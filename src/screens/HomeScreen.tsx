@@ -20,7 +20,10 @@ export default function HomeScreen({ onLogout, onSelectTour, onShowHistory }: an
       setTeamName(name || '');
 
       try {
+          // 1. Tentative Réseau
           const response = await api.get('/tours');
+          
+          // Filtrage : Mes tournées + Statut Valide
           const myTours = response.data.filter((t: any) => 
             (t.team?.id === teamId || t.team_id === teamId) && 
             ['PLANNED', 'IN_PROGRESS'].includes(t.status)
@@ -30,10 +33,29 @@ export default function HomeScreen({ onLogout, onSelectTour, onShowHistory }: an
           myTours.sort((a: any, b: any) => a.tour_date.localeCompare(b.tour_date));
           
           setTours(myTours);
+          
+          // Mise en cache pour le mode hors-ligne
           await AsyncStorage.setItem('cached_tours', JSON.stringify(myTours));
-      } catch (networkError) {
+
+      } catch (networkError: any) {
+          console.log("Erreur réseau ou API:", networkError);
+
+          // GESTION ERREUR 401 (Session expirée)
+          if (networkError.response && networkError.response.status === 401) {
+              Alert.alert("Session expirée", "Votre session a expiré. Veuillez vous reconnecter.");
+              onLogout(); // Déconnexion forcée
+              return;
+          }
+
+          // GESTION MODE HORS-LIGNE (Si pas de réseau)
           const cached = await AsyncStorage.getItem('cached_tours');
-          if (cached) setTours(JSON.parse(cached));
+          if (cached) {
+              setTours(JSON.parse(cached));
+              // Petit toast ou log pour dire qu'on est offline (optionnel)
+          } else {
+             // Si ni réseau ni cache, on ne peut rien faire
+             Alert.alert("Connexion requise", "Impossible de charger les tournées et aucun cache disponible.");
+          }
       }
     } catch (error) {
       console.error(error);
@@ -44,7 +66,11 @@ export default function HomeScreen({ onLogout, onSelectTour, onShowHistory }: an
   };
 
   useEffect(() => { loadData(); }, []);
-  const onRefresh = () => { setRefreshing(true); loadData(); };
+  
+  const onRefresh = () => { 
+      setRefreshing(true); 
+      loadData(); 
+  };
 
   const renderTour = ({ item }: { item: any }) => {
     // LOGIQUE DE RESTRICTION
@@ -55,7 +81,7 @@ export default function HomeScreen({ onLogout, onSelectTour, onShowHistory }: an
     const canStart = isToday || isStarted;
 
     return (
-      <Card style={[styles.card, !canStart && { opacity: 0.8 }]} mode="elevated">
+      <Card style={[styles.card, !canStart && { opacity: 0.7 }]} mode="elevated">
         <Card.Title 
           title={item.name} 
           subtitle={isToday ? "Aujourd'hui" : `Prévu le : ${item.tour_date}`}
@@ -63,7 +89,7 @@ export default function HomeScreen({ onLogout, onSelectTour, onShowHistory }: an
           left={(props) => <Badge size={24} style={{backgroundColor: item.status === 'IN_PROGRESS' ? 'orange' : isToday ? '#2196F3' : 'gray'}}>{item.status === 'IN_PROGRESS' ? 'GO' : isToday ? 'J' : '📅'}</Badge>}
         />
         <Card.Content>
-          <Text variant="bodyMedium">Véhicule : {item.vehicle?.name}</Text>
+          <Text variant="bodyMedium">Véhicule : {item.vehicle?.name || 'Non assigné'}</Text>
         </Card.Content>
         <Card.Actions>
           <Button 
@@ -75,7 +101,9 @@ export default function HomeScreen({ onLogout, onSelectTour, onShowHistory }: an
                     Alert.alert("Pas encore !", "Cette tournée est prévue pour une date ultérieure. Vous ne pouvez pas la démarrer maintenant.");
                 }
             }}
-            disabled={!canStart} // Désactive visuellement le bouton
+            disabled={!canStart} 
+            style={{ borderColor: canStart ? undefined : 'gray' }}
+            textColor={canStart ? undefined : 'gray'}
           >
             {item.status === 'IN_PROGRESS' ? 'CONTINUER' : canStart ? 'DÉMARRER' : 'À VENIR'}
           </Button>
@@ -103,7 +131,7 @@ export default function HomeScreen({ onLogout, onSelectTour, onShowHistory }: an
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
           ListEmptyComponent={
             <View style={styles.center}>
-              <Text>Aucune tournée planifiée.</Text>
+              <Text>Aucune tournée planifiée pour le moment.</Text>
               <Button onPress={onRefresh} style={{marginTop: 20}}>Actualiser</Button>
             </View>
           }

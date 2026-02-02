@@ -37,9 +37,17 @@ export default function TeamSelectionScreen({ onTeamSelected, onLogout }: any) {
 
       setTeams(Array.from(uniqueTeamsMap.values()));
 
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      Alert.alert("Erreur", "Impossible de charger les équipes du jour.");
+      
+      // --- CORRECTION ICI ---
+      if (error.response && error.response.status === 401) {
+          // Si le token est invalide/expiré
+          Alert.alert("Session expirée", "Veuillez vous reconnecter.");
+          onLogout(); // <--- On force la déconnexion
+      } else {
+          Alert.alert("Erreur", "Impossible de charger les équipes du jour. Vérifiez votre connexion.");
+      }
     } finally {
       setLoading(false);
     }
