@@ -1,23 +1,26 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, View, Alert } from 'react-native';
-import { Provider as PaperProvider, TextInput, Button, Text } from 'react-native-paper';
+import { StyleSheet, View, Alert, Image, KeyboardAvoidingView, Platform, ScrollView, StatusBar } from 'react-native';
+import { Provider as PaperProvider, TextInput, Button, Text, Surface, HelperText } from 'react-native-paper';
 import { api } from './src/config/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Écrans
 import HomeScreen from './src/screens/HomeScreen';
-import TeamSelectionScreen from './src/screens/TeamSelectionScreen'; // <--- IMPORT
+import TeamSelectionScreen from './src/screens/TeamSelectionScreen';
 import TourExecutionScreen from './src/screens/TourExecutionScreen';
 import HistoryScreen from './src/screens/HistoryScreen';
+
 export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
-  // États de navigation
+  const [error, setError] = useState<string | null>(null);
+  
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [hasTeamSelected, setHasTeamSelected] = useState(false);
   const [selectedTour, setSelectedTour] = useState<any>(null);
+  const [showHistory, setShowHistory] = useState(false);
 
-  // Vérifier l'état au lancement
   useEffect(() => {
     checkLoginStatus();
   }, []);
@@ -25,17 +28,20 @@ export default function App() {
   const checkLoginStatus = async () => {
     const token = await AsyncStorage.getItem('access_token');
     const teamId = await AsyncStorage.getItem('team_id');
-    
     if (token) {
-        setIsLoggedIn(true);
-        if (teamId) {
-            setHasTeamSelected(true);
-        }
+      setIsLoggedIn(true);
+      if (teamId) setHasTeamSelected(true);
     }
   };
 
   const handleLogin = async () => {
+    if (!email || !password) {
+      setError("Veuillez remplir tous les champs.");
+      return;
+    }
+
     setLoading(true);
+    setError(null);
     try {
       const response = await api.post('/auth/login', {
         email: email.trim().toLowerCase(),
@@ -43,20 +49,14 @@ export default function App() {
       });
 
       const { access_token } = response.data;
-
-      // On stocke le token générique
       await AsyncStorage.setItem('access_token', access_token);
-      
-      // On nettoie toute vieille sélection d'équipe
       await AsyncStorage.removeItem('team_id');
       await AsyncStorage.removeItem('team_name');
       
       setIsLoggedIn(true);
-      setHasTeamSelected(false); // On force la sélection
-
-    } catch (error: any) {
-      console.error(error);
-      Alert.alert("Erreur", "Email ou mot de passe incorrect.");
+      setHasTeamSelected(false);
+    } catch (err: any) {
+      setError("Identifiants incorrects ou serveur injoignable.");
     } finally {
       setLoading(false);
     }
@@ -67,108 +67,163 @@ export default function App() {
     setIsLoggedIn(false);
     setHasTeamSelected(false);
     setSelectedTour(null);
+    setShowHistory(false);
     setEmail('');
     setPassword('');
-    setShowHistory(false);
   };
 
+  // --- RENDU CONDITIONNEL (NAVIGATION) ---
   
-
-  const handleChangeTeam = async () => {
-      // Permet de revenir à la sélection d'équipe sans se déconnecter totalement
-      await AsyncStorage.removeItem('team_id');
-      setHasTeamSelected(false);
-      setSelectedTour(null);
-  };
+  if (isLoggedIn && hasTeamSelected && selectedTour) {
+    return <PaperProvider><TourExecutionScreen tour={selectedTour} onBack={() => setSelectedTour(null)} /></PaperProvider>;
+  }
 
   if (isLoggedIn && hasTeamSelected && showHistory) {
-      return (
-        <PaperProvider>
-            <HistoryScreen onBack={() => setShowHistory(false)} />
-        </PaperProvider>
-      );
+    return <PaperProvider><HistoryScreen onBack={() => setShowHistory(false)} /></PaperProvider>;
   }
 
-  // --- 1. ROUTAGE : ÉCRAN DE TRAVAIL (CARTE/LISTE) ---
-  if (isLoggedIn && hasTeamSelected && selectedTour) {
-      return (
-        <PaperProvider>
-            <TourExecutionScreen 
-              tour={selectedTour} 
-              onBack={() => setSelectedTour(null)} 
-            />
-        </PaperProvider>
-      );
-  }
-
-  // --- 2. ROUTAGE : ACCUEIL (LISTE DES TOURNÉES DE L'ÉQUIPE) ---
   if (isLoggedIn && hasTeamSelected) {
     return (
       <PaperProvider>
         <HomeScreen 
-          onLogout={handleChangeTeam} // Le bouton logout renvoie au choix d'équipe
-          onSelectTour={setSelectedTour} 
+          onLogout={() => { setHasTeamSelected(false); setSelectedTour(null); }} 
+          onSelectTour={setSelectedTour}
           onShowHistory={() => setShowHistory(true)}
         />
       </PaperProvider>
     );
   }
 
-  // --- 3. ROUTAGE : SÉLECTION D'ÉQUIPE (NOUVEAU) ---
   if (isLoggedIn && !hasTeamSelected) {
-      return (
-          <PaperProvider>
-              <TeamSelectionScreen 
-                  onTeamSelected={() => setHasTeamSelected(true)}
-                  onLogout={handleLogout}
-              />
-          </PaperProvider>
-      );
+    return <PaperProvider><TeamSelectionScreen onTeamSelected={() => setHasTeamSelected(true)} onLogout={handleLogout}/></PaperProvider>;
   }
 
-  // --- 4. ROUTAGE : LOGIN ---
+  // --- ÉCRAN DE CONNEXION AMÉLIORÉ ---
   return (
     <PaperProvider>
-      <View style={styles.container}>
-        <Text variant="headlineLarge" style={styles.title}>Horizon Mobile 🚛</Text>
-        <Text style={{marginBottom: 20, color: 'gray'}}>Accès Terrain</Text>
-        
-        <TextInput
-          label="Email commun"
-          value={email}
-          onChangeText={setEmail}
-          mode="outlined"
-          style={styles.input}
-          autoCapitalize="none"
-          keyboardType="email-address"
-        />
-        
-        <TextInput
-          label="Mot de passe"
-          value={password}
-          onChangeText={setPassword}
-          mode="outlined"
-          secureTextEntry
-          style={styles.input}
-        />
+      <StatusBar barStyle="dark-content" backgroundColor="#f5f5f5" />
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.container}
+      >
+        <ScrollView contentContainerStyle={styles.scrollContainer} keyboardShouldPersistTaps="handled">
+          
+          <View style={styles.headerSection}>
+            <Surface style={styles.logoCircle} elevation={4}>
+              <Text style={{ fontSize: 50 }}>🌍</Text>
+            </Surface>
+            <Text variant="headlineMedium" style={styles.appTitle}>HORIZON PROPRE</Text>
+            <Text variant="bodyMedium" style={styles.appSubtitle}>Gestion de collecte & d'assainissement</Text>
+          </View>
 
-        <Button 
-          mode="contained" 
-          onPress={handleLogin} 
-          loading={loading}
-          disabled={loading}
-          style={styles.button}
-        >
-          SE CONNECTER
-        </Button>
-      </View>
+          <Surface style={styles.loginCard} elevation={2}>
+            <Text variant="titleLarge" style={styles.cardTitle}>Connexion Staff</Text>
+            
+            <View style={styles.inputGap}>
+              <TextInput
+                label="Email professionnel"
+                value={email}
+                onChangeText={(t) => { setEmail(t); setError(null); }}
+                mode="outlined"
+                keyboardType="email-address"
+                autoCapitalize="none"
+                left={ <TextInput.Icon icon="email" color={email ? "#2196F3" : "#999"} /> }
+                error={!!error}
+              />
+            </View>
+
+            <View style={styles.inputGap}>
+              <TextInput
+                label="Mot de passe"
+                value={password}
+                onChangeText={(t) => { setPassword(t); setError(null); }}
+                mode="outlined"
+                secureTextEntry
+                left={ <TextInput.Icon icon="lock" color={password ? "#2196F3" : "#999"} /> }
+                error={!!error}
+              />
+              <HelperText type="error" visible={!!error} style={{ paddingLeft: 0 }}>
+                {error}
+              </HelperText>
+            </View>
+
+            <Button 
+              mode="contained" 
+              onPress={handleLogin} 
+              loading={loading}
+              disabled={loading}
+              style={styles.loginButton}
+              contentStyle={{ height: 50 }}
+              labelStyle={{ fontSize: 16, fontWeight: 'bold' }}
+            >
+              ACCÉDER AU TERRAIN
+            </Button>
+          </Surface>
+
+          <Text style={styles.footerText}>By SEMITEJA Kev • Goma, RDC</Text>
+          
+        </ScrollView>
+      </KeyboardAvoidingView>
     </PaperProvider>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', padding: 20 },
-  title: { marginBottom: 10, fontWeight: 'bold', color: '#2196F3' },
-  input: { width: '100%', marginBottom: 15 },
-  button: { width: '100%', marginTop: 10, paddingVertical: 5 },
+  container: {
+    flex: 1,
+    backgroundColor: '#f8f9fa',
+  },
+  scrollContainer: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    padding: 25,
+  },
+  headerSection: {
+    alignItems: 'center',
+    marginBottom: 40,
+  },
+  logoCircle: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  appTitle: {
+    fontWeight: '900',
+    color: '#1a1a1a',
+    letterSpacing: 1,
+  },
+  appSubtitle: {
+    color: '#666',
+    marginTop: 5,
+  },
+  loginCard: {
+    backgroundColor: '#fff',
+    padding: 25,
+    borderRadius: 20,
+    width: '100%',
+  },
+  cardTitle: {
+    fontWeight: 'bold',
+    marginBottom: 25,
+    color: '#333',
+    textAlign: 'center'
+  },
+  inputGap: {
+    marginBottom: 10,
+  },
+  loginButton: {
+    marginTop: 20,
+    borderRadius: 12,
+    backgroundColor: '#2196F3',
+  },
+  footerText: {
+    textAlign: 'center',
+    color: '#adb5bd',
+    marginTop: 40,
+    fontSize: 12,
+  }
 });

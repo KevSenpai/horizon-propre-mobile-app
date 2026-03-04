@@ -1,262 +1,293 @@
-import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, FlatList, Alert, Linking, Platform } from 'react-native';
-import { Appbar, Card, Text, Button, IconButton, ActivityIndicator } from 'react-native-paper';
-import MapView, { Marker, Polyline } from 'react-native-maps'; // Ajout de Polyline
+import React, { useEffect, useState, useRef } from 'react';
+import { View, StyleSheet, FlatList, Alert, Linking, Platform, Dimensions } from 'react-native';
+import { Appbar, Card, Text, Button, IconButton, ActivityIndicator, Portal, Dialog, RadioButton, ProgressBar, Surface, Avatar } from 'react-native-paper';
+import MapView, { Marker, Polyline, Callout, PROVIDER_GOOGLE } from 'react-native-maps'; // Ajout de Callout
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../config/api';
 import { connectSocket, disconnectSocket, sendPosition, sendCollectionUpdate } from '../services/socket';
 
 export default function TourExecutionScreen({ tour, onBack }: any) {
+  const mapRef = useRef<MapView>(null);
   const [clients, setClients] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentLocation, setCurrentLocation] = useState<any>(null);
-  const [routeCoordinates, setRouteCoordinates] = useState<any[]>([]); // Pour le tracé bleu
+  const [routeCoordinates, setRouteCoordinates] = useState<any[]>([]);
 
   const [isStarted, setIsStarted] = useState(tour.status === 'IN_PROGRESS');
   const [isFinishing, setIsFinishing] = useState(false);
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
 
+  const [failModalVisible, setFailModalVisible] = useState(false);
+  const [selectedClientForFail, setSelectedClientForFail] = useState<any>(null);
+  const [failReason, setFailReason] = useState('CLIENT_ABSENT');
+
+  const completedCount = clients.filter(c => c.status === 'COMPLETED' || c.status === 'FAILED').length;
+  const totalCount = clients.length;
+  const progress = totalCount > 0 ? completedCount / totalCount : 0;
+
+  // 1. GESTION NAVIGATION GPS DIRECTE (LANCE L'ITINÉRAIRE)
+  const startNavigation = (lat: number, lng: number) => {
+    const scheme = Platform.select({
+      ios: `maps://app?daddr=${lat},${lng}`, // daddr lance l'itinéraire sur iOS
+      android: `google.navigation:q=${lat},${lng}`, // google.navigation lance l'itinéraire sur Android
+    });
+
+    const url = scheme || `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+
+    Linking.canOpenURL(url).then((supported) => {
+      if (supported) {
+        Linking.openURL(url);
+      } else {
+        Alert.alert("Erreur", "Impossible d'ouvrir l'application de navigation.");
+      }
+    });
+  };
+
   useEffect(() => {
-    loadClients();
+    initAll();
     connectSocket();
+    return () => disconnectSocket();
+  }, []);
 
+  useEffect(() => {
     let locationSubscription: Location.LocationSubscription | null = null;
-
-    const startTracking = async () => {
+    const setupLocationTracking = async () => {
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') return;
 
-      let initialLocation = await Location.getCurrentPositionAsync({});
-      setCurrentLocation(initialLocation.coords);
-
       locationSubscription = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, timeInterval: 10000, distanceInterval: 50 },
-        (location) => {
-          const { latitude, longitude } = location.coords;
-          setCurrentLocation(location.coords);
-          if (isStarted) sendPosition(tour.id, latitude, longitude);
+        { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 10 },
+        (loc) => {
+          setCurrentLocation(loc.coords);
+          if (isStarted) {
+            sendPosition(tour.id, loc.coords.latitude, loc.coords.longitude);
+            fetchRoute(loc.coords, clients);
+          }
         }
       );
     };
+    setupLocationTracking();
+    return () => { if (locationSubscription) locationSubscription.remove(); };
+  }, [isStarted]);
 
-    startTracking();
-
-    return () => {
-      if (locationSubscription) locationSubscription.remove();
-      disconnectSocket();
-    };
-  }, [isStarted, tour.id]);
+  const initAll = async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status === 'granted') {
+        const loc = await Location.getCurrentPositionAsync({});
+        setCurrentLocation(loc.coords);
+      }
+      await loadClients();
+    } catch (e) { console.error(e); }
+  };
 
   const loadClients = async () => {
+    setLoading(true);
     try {
-      const cacheKey = `tour_clients_${tour.id}`;
-      let data = [];
-
-      try {
-        const response = await api.get(`/tour-clients/tour/${tour.id}`);
-        data = response.data;
-        await AsyncStorage.setItem(cacheKey, JSON.stringify(data));
-      } catch (networkError) {
-        console.log("Offline mode for details");
-        const cached = await AsyncStorage.getItem(cacheKey);
-        if (cached) data = JSON.parse(cached);
-      }
-
+      const response = await api.get(`/tour-clients/tour/${tour.id}`);
+      const data = response.data;
       setClients(data);
-
-      // Préparer les coordonnées pour la ligne bleue (Polyline)
-      const coords = data
-        .filter((item: any) => item.client.location && item.client.location.coordinates)
-        .map((item: any) => ({
-            // ATTENTION : GeoJSON est [Long, Lat], MapView veut {latitude, longitude}
-            latitude: item.client.location.coordinates[1],
-            longitude: item.client.location.coordinates[0],
-        }));
-      setRouteCoordinates(coords);
-
+      await fetchRoute(currentLocation, data);
     } catch (error) {
-      Alert.alert("Erreur", "Impossible de charger les clients");
+      Alert.alert("Erreur", "Chargement impossible");
     } finally {
       setLoading(false);
     }
   };
 
-  // --- NOUVELLE FONCTION : OUVRIR GOOGLE MAPS ---
-  const openMaps = (lat: number, lng: number, label: string) => {
-    const scheme = Platform.select({ ios: 'maps:0,0?q=', android: 'geo:0,0?q=' });
-    const latLng = `${lat},${lng}`;
-    const url = Platform.select({
-      ios: `${scheme}${label}@${latLng}`,
-      android: `${scheme}${latLng}(${label})`
-    });
-
-    if (url) {
-        Linking.openURL(url);
-    }
-  };
-
-  const handleStartTour = async () => {
+  const fetchRoute = async (startPos: any, clientList: any[]) => {
+    const pending = clientList.filter(c => c.status !== 'COMPLETED' && c.status !== 'FAILED');
+    if (pending.length === 0) { setRouteCoordinates([]); return; }
+    const points = [];
+    if (isStarted && startPos) points.push({ latitude: startPos.latitude, longitude: startPos.longitude });
+    points.push(...pending.map(c => ({
+      latitude: c.client.location.coordinates[1],
+      longitude: c.client.location.coordinates[0],
+    })));
+    if (points.length < 2) return;
     try {
-      await api.patch(`/tours/${tour.id}`, { status: 'IN_PROGRESS' });
-      setIsStarted(true);
-    } catch (e) { Alert.alert("Erreur", "Impossible de démarrer."); }
-  };
-
-  const handleFinishTour = async () => {
-    Alert.alert("Terminer ?", "Confirmer la fin ?", [
-      { text: "Annuler", style: "cancel" },
-      { text: "Oui", onPress: async () => {
-          if (isFinishing) return;
-          setIsFinishing(true);
-          try {
-            await api.patch(`/tours/${tour.id}`, { status: 'COMPLETED' });
-            onBack(); 
-          } catch (e) { setIsFinishing(false); }
-        }
+      const coordsStr = points.map(p => `${p.longitude},${p.latitude}`).join(';');
+      const url = `https://router.project-osrm.org/route/v1/driving/${coordsStr}?overview=full&geometries=geojson`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.routes?.length > 0) {
+        setRouteCoordinates(data.routes[0].geometry.coordinates.map((c: any) => ({
+          latitude: c[1], longitude: c[0]
+        })));
       }
-    ]);
+    } catch (e) { console.log("Routing error", e); }
   };
 
-  const handleValidate = async (client: any) => {
-    if (!isStarted) {
-      Alert.alert("Attente", "Veuillez d'abord DÉMARRER la tournée.");
-      return;
-    }
+  const handleAction = async (client: any, status: 'COMPLETED' | 'FAILED', reason?: string) => {
     if (processingIds.has(client.id)) return;
-
-    setClients(prev => prev.map(item => item.clientId === client.id ? { ...item, status: 'COMPLETED' } : item));
     setProcessingIds(prev => new Set(prev).add(client.id));
-
+    const updated = clients.map(c => c.clientId === client.id ? { ...c, status } : c);
+    setClients(updated);
     try {
-        await api.post('/collections', { tour_id: tour.id, client_id: client.id, status: 'COMPLETED' });
-        sendCollectionUpdate(tour.id, client.id, 'COMPLETED');
-    } catch (error) { console.error(error); } 
-    finally {
-        setProcessingIds(prev => { const n = new Set(prev); n.delete(client.id); return n; });
-    }
+      await api.post('/collections', { tour_id: tour.id, client_id: client.id, status, reason_if_failed: reason });
+      sendCollectionUpdate(tour.id, client.id, status);
+      await fetchRoute(currentLocation, updated);
+    } catch (e) { Alert.alert("Erreur", "Sera synchronisé plus tard."); } 
+    finally { setProcessingIds(prev => { const n = new Set(prev); n.delete(client.id); return n; }); }
   };
 
-  const renderClient = ({ item, index }: any) => {
-    const client = item.client;
-    const isDone = item.status === 'COMPLETED'; 
-    const isProcessing = processingIds.has(client.id);
-    
-    // Récupération sécurisée des coordonnées
-    const hasGPS = client.location && client.location.coordinates;
-    const lat = hasGPS ? client.location.coordinates[1] : null;
-    const lng = hasGPS ? client.location.coordinates[0] : null;
+  const renderClientItem = ({ item, index }: any) => {
+    const c = item.client;
+    const isDone = item.status === 'COMPLETED';
+    const isFailed = item.status === 'FAILED';
+    const isNext = !isDone && !isFailed && clients.find(cl => cl.status !== 'COMPLETED' && cl.status !== 'FAILED')?.clientId === item.clientId;
+    const lat = c.location?.coordinates[1];
+    const lng = c.location?.coordinates[0];
 
     return (
-      <Card style={[styles.card, isDone ? styles.doneCard : null]}>
-        <Card.Title 
-          title={`${index + 1}. ${client.name}`} 
-          titleStyle={isDone ? {textDecorationLine: 'line-through', color: 'gray'} : {}}
-          subtitle={client.street_address}
-          // --- CORRECTION : BOUTON MAPS À GAUCHE ---
-          left={(props) => (
-             hasGPS ? (
-                <IconButton {...props} icon="google-maps" iconColor="#4285F4" onPress={() => openMaps(lat, lng, client.name)} />
-             ) : (
-                <IconButton {...props} icon="map-marker-off" iconColor="gray" />
-             )
-          )}
-          right={(props) => (
-            isDone ? (
-                <IconButton {...props} icon="check" iconColor="gray" disabled />
-            ) : isProcessing ? (
-                <ActivityIndicator animating color="green" style={{ marginRight: 16 }} />
+      <Card style={[styles.clientCard, isNext && styles.nextClientCard, isDone && styles.doneCard, isFailed && styles.failedCard]}>
+        <Card.Content style={styles.cardContent}>
+          <View style={styles.cardMain}>
+            <Avatar.Text size={36} label={(index + 1).toString()} style={{ backgroundColor: isDone ? '#40C057' : isFailed ? '#FA5252' : isNext ? '#228BE6' : '#CED4DA' }} />
+            <View style={styles.clientInfo}>
+              <Text style={[styles.nameText, (isDone || isFailed) && { textDecorationLine: 'line-through', color: '#ADB5BD' }]}>{c.name}</Text>
+              <Text style={{ color: '#666', fontSize: 12 }}>{c.street_address}</Text>
+            </View>
+          </View>
+          <View style={styles.cardActions}>
+            {!(isDone || isFailed) ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <IconButton 
+                    icon="google-maps" 
+                    mode="contained-tonal" 
+                    containerColor="#E7F5FF" 
+                    iconColor="#228BE6" 
+                    onPress={() => startNavigation(lat, lng)} // <--- NAVIGATION DIRECTE
+                />
+                <IconButton icon="close-circle" mode="contained" containerColor="#FFF5F5" iconColor="#FA5252" onPress={() => { setSelectedClientForFail(c); setFailModalVisible(true); }} />
+                <Button mode="contained" buttonColor="#40C057" onPress={() => handleAction(c, 'COMPLETED')} loading={processingIds.has(c.id)}>FAIT</Button>
+              </View>
             ) : (
-                <IconButton {...props} icon="check-circle" iconColor="green" size={30} onPress={() => handleValidate(client)} />
-            )
-          )}
-        />
+              <View style={styles.statusBadge}>
+                <Text style={{ color: isDone ? '#2B8A3E' : '#C92A2A', fontWeight: 'bold', fontSize: 12 }}>{isDone ? 'COLLECTÉ' : 'RATÉ'}</Text>
+              </View>
+            )}
+          </View>
+        </Card.Content>
       </Card>
     );
   };
 
   return (
     <View style={styles.container}>
-      <Appbar.Header elevated>
+      <Appbar.Header elevated style={{ backgroundColor: '#fff' }}>
         <Appbar.BackAction onPress={onBack} />
-        <Appbar.Content title={tour.name} subtitle={isStarted ? "🟢 En cours" : "⚪ En attente"} />
+        <Appbar.Content title={tour.name} titleStyle={{ fontSize: 18, fontWeight: 'bold' }} />
+        {isStarted && (
+          <Button mode="text" textColor="green" onPress={() => {
+            Alert.alert("Terminer ?", "Clôturer la tournée ?", [
+              { text: "Non" }, { text: "Oui", onPress: async () => {
+                await api.patch(`/tours/${tour.id}`, { status: 'COMPLETED' });
+                onBack();
+              }}
+            ]);
+          }}>FINIR</Button>
+        )}
       </Appbar.Header>
 
-      <View style={styles.mapContainer}>
+      <View style={styles.mapWrapper}>
         <MapView
+          ref={mapRef}
           style={styles.map}
+          showsUserLocation
           initialRegion={{
-            // On centre sur le premier client ou Goma par défaut
-            latitude: routeCoordinates.length > 0 ? routeCoordinates[0].latitude : -1.6585,
-            longitude: routeCoordinates.length > 0 ? routeCoordinates[0].longitude : 29.2205,
-            latitudeDelta: 0.05,
-            longitudeDelta: 0.05,
+            latitude: currentLocation?.latitude || -1.6585,
+            longitude: currentLocation?.longitude || 29.2205,
+            latitudeDelta: 0.03,
+            longitudeDelta: 0.03,
           }}
-          showsUserLocation={true}
         >
-          {/* LIGNE BLEUE (ITINÉRAIRE) */}
-          <Polyline coordinates={routeCoordinates} strokeColor="#2196F3" strokeWidth={4} />
+          <Polyline coordinates={routeCoordinates} strokeColor="#228BE6" strokeWidth={5} />
+          {/* LES MARQUEURS DES CLIENTS */}
+          {clients.map((item, idx) => {
+            const c = item.client;
+            const coords = c.location?.coordinates;
+  if (!coords) return null;
 
-          {/* MARQUEURS */}
-          {clients.map((item, index) => {
-             const c = item.client;
-             if(c.location?.coordinates) {
-                 // Inversion [1] = Lat, [0] = Lon pour Leaflet/GoogleMaps
-                 return (
-                    <Marker 
-                        key={c.id} 
-                        coordinate={{latitude: c.location.coordinates[1], longitude: c.location.coordinates[0]}} 
-                        title={`${index+1}. ${c.name}`}
-                        description={item.status === 'COMPLETED' ? "✅ Fait" : "À faire"}
-                        pinColor={item.status === 'COMPLETED' ? 'green' : 'red'}
-                    />
-                 );
-             }
-             return null;
-          })}
+            const isDone = item.status === 'COMPLETED';
+            const isFailed = item.status === 'FAILED';
+  return (
+    <Marker 
+      key={item.clientId} 
+      coordinate={{ latitude: coords[1], longitude: coords[0] }}
+      // --- SOLUTION NATIVE : SIMPLE ET ROBUSTE ---
+      title={c.name} // Affiche le nom dans la bulle système
+      description={c.street_address} // Affiche l'adresse en petit dessous
+      // -------------------------------------------
+      pinColor={isDone ? 'green' : isFailed ? 'orange' : 'red'}
+    />
+  );
+})}
         </MapView>
+        
+        <Surface style={styles.progressCard} elevation={2}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5 }}>
+            <Text style={{ fontWeight: 'bold' }}>Progression</Text>
+            <Text style={{ color: '#666' }}>{completedCount}/{totalCount}</Text>
+          </View>
+          <ProgressBar progress={progress} color="#40C057" style={{ height: 8, borderRadius: 4 }} />
+        </Surface>
       </View>
 
-      <View style={styles.listContainer}>
-        {loading ? (
-          <ActivityIndicator style={{marginTop: 20}} />
+      <View style={styles.listWrapper}>
+        {!isStarted ? (
+          <View style={styles.startOverlay}>
+            <Avatar.Icon size={64} icon="play-circle" style={{ backgroundColor: '#E7F5FF' }} color="#228BE6" />
+            <Text style={{ marginVertical: 15, fontSize: 20, fontWeight: 'bold' }}>Tournée prête</Text>
+            <Button mode="contained" style={styles.bigButton} onPress={async () => {
+              await api.patch(`/tours/${tour.id}`, { status: 'IN_PROGRESS' });
+              setIsStarted(true);
+            }}>DÉMARRER LA MISSION</Button>
+          </View>
         ) : (
-          <>
-            {!isStarted ? (
-                <Button mode="contained" icon="play" style={{margin: 10, backgroundColor: '#2196F3'}} onPress={handleStartTour}>
-                    DÉMARRER LA TOURNÉE
-                </Button>
-            ) : (
-                <Button 
-                    mode="contained" 
-                    icon="flag-checkered" 
-                    style={{margin: 10, backgroundColor: 'green'}} 
-                    onPress={handleFinishTour}
-                    loading={isFinishing}
-                    disabled={isFinishing}
-                >
-                    TERMINER LA TOURNÉE
-                </Button>
-            )}
-
-            <FlatList
-              data={clients}
-              renderItem={renderClient}
-              keyExtractor={(item) => item.clientId}
-              contentContainerStyle={{paddingBottom: 20}}
-            />
-          </>
+          <FlatList data={clients} renderItem={renderClientItem} keyExtractor={item => item.clientId} contentContainerStyle={{ padding: 12, paddingBottom: 40 }} />
         )}
       </View>
+
+      <Portal>
+        <Dialog visible={failModalVisible} onDismiss={() => setFailModalVisible(false)}>
+          <Dialog.Title>Signalement d'échec</Dialog.Title>
+          <Dialog.Content>
+            <RadioButton.Group onValueChange={v => setFailReason(v)} value={failReason}>
+              <RadioButton.Item label="Client absent" value="CLIENT_ABSENT" />
+              <RadioButton.Item label="Accès impossible" value="ACCESS_DENIED" />
+              <RadioButton.Item label="Déchets non conformes" value="NON_COMPLIANT_WASTE" />
+              <RadioButton.Item label="Autre" value="OTHER" />
+            </RadioButton.Group>
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button onPress={() => setFailModalVisible(false)}>Annuler</Button>
+            <Button onPress={() => { handleAction(selectedClientForFail, 'FAILED', failReason); setFailModalVisible(false); }}>Confirmer</Button>
+          </Dialog.Actions>
+        </Dialog>
+      </Portal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: 'white' },
-  mapContainer: { height: '45%', width: '100%' }, // J'ai agrandi un peu la carte
-  map: { width: '100%', height: '100%' },
-  listContainer: { flex: 1, backgroundColor: '#f5f5f5' },
-  card: { marginHorizontal: 10, marginTop: 10, backgroundColor: 'white' },
-  doneCard: { backgroundColor: '#f0fdf4', opacity: 0.8 }
+  container: { flex: 1, backgroundColor: '#F8F9FA' },
+  mapWrapper: { height: Dimensions.get('window').height * 0.35, position: 'relative' },
+  map: { ...StyleSheet.absoluteFillObject },
+  calloutContainer: { padding: 8, borderRadius: 8, backgroundColor: '#fff', width: 180 },
+  progressCard: { position: 'absolute', bottom: 15, left: 15, right: 15, padding: 12, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.95)' },
+  listWrapper: { flex: 1 },
+  clientCard: { marginBottom: 10, borderRadius: 12, backgroundColor: '#fff' },
+  nextClientCard: { borderColor: '#228BE6', borderLeftWidth: 6 },
+  doneCard: { backgroundColor: '#F8F9FA', opacity: 0.8 },
+  failedCard: { backgroundColor: '#FFF5F5' },
+  cardContent: { padding: 12 },
+  cardMain: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  clientInfo: { marginLeft: 12, flex: 1 },
+  nameText: { fontWeight: 'bold' },
+  cardActions: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
+  statusBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, backgroundColor: '#f0f0f0' },
+  startOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
+  bigButton: { width: '100%', borderRadius: 8 },
 });
